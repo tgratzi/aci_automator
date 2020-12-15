@@ -1,0 +1,117 @@
+---
+- name:               Bind contract to EPGs
+  hosts:              "{{ apic }}"
+  connection:         local
+  gather_facts:       no
+  vars:
+    scope:            "context"
+    apic_info:        &apic_info
+        host:           "{{ apic_ip }}"
+        username:       "{{ lookup('env', 'ANSIBLE_NET_USERNAME') }}"
+        password:       "{{ lookup('env', 'ANSIBLE_NET_PASSWORD') }}"
+        validate_certs: no
+    debug_on_state:     "{{ debug_on | default(false) }}"
+    filter_name:        "fl:{{ subj_name }}_{{ dst_port }}"
+    filter_entry_name:  "flEn:{{ dst_port }}"
+    contract_name:      "ticket_id:{{ticket_id}}-{{ prov_ap_name }}:{{ prov_epg_name }}_to_{{ cons_ap_name }}:{{ cons_epg_name }}"
+
+  tasks:
+      # Create an ACI snapshot
+      - name:             Create an APIC Snapshot
+        aci_config_snapshot:
+          <<: *apic_info
+          validate_certs: no
+          state:          present
+          export_policy:  config_backup
+          max_count:      10
+          description:    Snapshot Created by Ansible
+
+      # Create a filter
+      - name:             Create Filter
+        aci_filter:
+          <<: *apic_info
+          validate_certs: no
+          use_proxy:      no
+          tenant:         "common"
+          filter:         "{{ filter_name }}"
+          state:          "present"
+        register:         flt
+
+      # Create a new filter entry
+      - name:             Create Filter Entry
+        aci_filter_entry:
+          <<: *apic_info
+          validate_certs: no
+          use_proxy:      no
+          filter:         "{{ filter_name }}"
+          entry:          "{{ filter_entry_name }}"
+          tenant:         "common"
+          ether_type:     "ip"
+          ip_protocol:    "{{ subj_name }}"
+          dst_port:       "{{ dst_port }}"
+          state:          "present"
+        register:         flt_entry
+
+      # Create contract
+      - name:             Create Contract
+        aci_rest:
+          <<: *apic_info
+          validate_certs: no
+          use_proxy:      no
+          path:           /api/node/mo/uni/tn-{{ prov_tn_name }}/brc-{{ contract_name }}.json
+          method:         post
+          content:
+            vzBrCP:
+              attributes:
+                name:     "{{ contract_name }}"
+                scope:    "{{ scope }}"
+                status:   "created,modified"
+
+      # Add subject and filter to the contract
+      - name:             Add the subject and filter
+        aci_rest:
+          <<: *apic_info
+          validate_certs: no
+          use_proxy:      no
+          path:           /api/node/mo/uni/tn-{{ prov_tn_name }}/brc-{{ contract_name }}/subj-{{ subj_name }}.json
+          method:         post
+          content:
+            vzSubj:
+              attributes:
+                name:     "{{ subj_name }}"
+                status:   "created,modified"
+              children:
+                -
+                 vzRsSubjFiltAtt:
+                   attributes:
+                     tnVzFilterName: "{{ subj_name }}_src_port_any_to_dst_port_{{ dst_port}}"
+                     status:         "created,modified"
+        register:         subj_and_flt
+
+      # Bind the contract to the source host's EPG
+      - name:             Bind Contract to Source EPG
+        aci_epg_to_contract:
+          <<: *apic_info
+          validate_certs: no
+          use_proxy:      no
+          tenant:         "{{ prov_tn_name }}"
+          ap:             "{{ prov_ap_name }}"
+          epg:            "{{ prov_epg_name }}"
+          contract:       "{{ contract_name }}"
+          contract_type:  provider
+          state:          present
+        register:         prov_epg_contract
+
+      # Bind the contract to the destination host's EPG
+      - name:             Bind Contract to Destination EPG
+        aci_epg_to_contract:
+          <<: *apic_info
+          validate_certs: no
+          use_proxy:      no
+          tenant:         "{{ cons_tn_name }}"
+          ap:             "{{ cons_ap_name }}"
+          epg:            "{{ cons_epg_name }}"
+          contract:       "{{ contract_name }}"
+          contract_type:  consumer
+          state:          present
+        register:         cons_epg_contract
